@@ -1,0 +1,11 @@
+[Unit]
+Description=Tapedrive statistics exporter for Prometheus
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/tapedrv-exporter-daemon start
+ExecStop=/usr/sbin/tapedrv-exporter-daemon stop
+Type=forking
+
+[Install]
+WantedBy=multi-user.target

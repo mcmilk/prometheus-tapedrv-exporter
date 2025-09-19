@@ -1,0 +1,264 @@
+#!/usr/bin/bash
+
+##############################################################################
+# Gather information of tape drives for prometheus.
+# Tino Reichardt <tino.reichardt@desy.de>
+#
+# TODO
+# - add error handling by wrapping sg_logs and sg_inq
+##############################################################################
+
+# 0x14 -> Device statistics [ds]
+function get_tapedrv_ds() {
+  sgdev="$1"
+  vendor="$2"
+  model="$3"
+  sn="$4"
+
+  # we need LTO4 here
+  lto=$(echo $5|grep -oP '\d+')
+  test $lto -lt 4 && return
+
+  # Lifetime media loads: 60
+  # Lifetime cleaning operations: 0
+  # Lifetime power on hours: 7398
+  # Lifetime media motion (head) hours: 1
+  # Lifetime metres of tape processed: 26870
+  mapfile -t MAP < <(sg_logs --page=0x14 $sgdev|grep -A6 "Device statistics page")
+  livetime_media_loads=$(echo ${MAP[1]}|grep -oP '\d+$')
+  lifetime_cleaning_cycles=$(echo ${MAP[2]}|grep -oP '\d+$')
+  lifetime_poweron_hours=$(echo ${MAP[3]}|grep -oP '\d+$')
+  lifetime_media_motion=$(echo ${MAP[4]}|grep -oP '\d+$')
+  lifetime_metres_of_tape_processed=$(echo ${MAP[5]}|grep -oP '\d+$')
+
+  echo "tapedrv_drive_livetime_media_loads{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $livetime_media_loads"
+  echo "tapedrv_drive_lifetime_cleaning_cycles{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $lifetime_cleaning_cycles"
+  echo "tapedrv_drive_lifetime_poweron_hours{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $lifetime_poweron_hours"
+  echo "tapedrv_drive_lifetime_media_motion{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $lifetime_media_motion"
+  echo "tapedrv_drive_lifetime_metres_of_tape_processed{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $lifetime_metres_of_tape_processed"
+}
+
+# 0x0c -> Sequential access device [sad]
+function get_ibm_tapedrv_sad() {
+  sgdev="$1"
+  vendor="$2"
+  model="$3"
+  sn="$4"
+
+  # reference: SCSI-Reference-GA32-0928-07.pdf page 269 /TR
+  # 0 Vendor specific parameter [0x8000] value: 2701
+  # 1 Vendor specific parameter [0x8001] value: 60 -> via page 0x14
+  # 2 Vendor specific parameter [0x8002] value: 0  -> via page 0x14
+  # 3 Vendor specific parameter [0x8003] value: 26626321
+  mapfile -t MAP < <(sg_logs --page=0x0c $sgdev|grep "Vendor specific parameter")
+  total_mbytes_since_last_cleaning=$(echo ${MAP[0]}|grep -oP '\d+$')
+  lifetime_poweron_in_seconds=$(echo ${MAP[3]}|grep -oP '\d+$')
+  echo "tapedrv_drive_total_mbytes_since_last_cleaning{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $total_mbytes_since_last_cleaning"
+  echo "tapedrv_drive_lifetime_poweron_in_seconds{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $lifetime_poweron_in_seconds"
+}
+
+# 0x0d -> Environmental Conditions Log [ecl]
+function get_ibm_tapedrv_ecl() {
+  sgdev="$1"
+  vendor="$2"
+  model="$3"
+  sn="$4"
+
+  PAGE=$(sg_logs --page=0x0d,0x01 $sgdev)
+  # parameter code=0x0
+  #   OTV=1
+  #   Temperature: 27 C
+  #   Lifetime maximum temperature: 32 C
+  #   Lifetime minimum temperature: 20 C
+  #   Maximum temperature since power on: 30 C
+  #   Minimum temperature since power on: 25 C
+  #   Maximum other temperature: 28 C
+  #   Minimum other temperature: 25 C
+  mapfile -t MAP < <(grep -A8 "parameter code=0x0$" <<< "$PAGE")
+  current_temp=$(echo ${MAP[2]}|grep -oP '\d+')
+  maxtemp_lifetime=$(echo ${MAP[3]}|grep -oP '\d+')
+  mintemp_lifetime=$(echo ${MAP[4]}|grep -oP '\d+')
+  maxtemp_poweron=$(echo ${MAP[5]}|grep -oP '\d+')
+  mintemp_poweron=$(echo ${MAP[6]}|grep -oP '\d+')
+  maxtemp_mounted=$(echo ${MAP[7]}|grep -oP '\d+')
+  mintemp_mounted=$(echo ${MAP[8]}|grep -oP '\d+')
+
+  echo "tapedrv_drive_current_temp{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $current_temp"
+  echo "tapedrv_drive_maxtemp_lifetime{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxtemp_lifetime"
+  echo "tapedrv_drive_mintemp_lifetime{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $mintemp_lifetime"
+  echo "tapedrv_drive_maxtemp_poweron{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxtemp_poweron"
+  echo "tapedrv_drive_mintemp_poweron{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $mintemp_poweron"
+  echo "tapedrv_drive_maxtemp_mounted{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxtemp_mounted"
+  echo "tapedrv_drive_mintemp_mounted{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $mintemp_mounted"
+
+  # parameter code=0x10
+  #   OTV=0
+  #   Temperature: 55 C
+  #   Lifetime maximum temperature: not available
+  #   Lifetime minimum temperature: not available
+  #   Maximum temperature since power on: 65 C
+  #   Minimum temperature since power on: 52 C
+  mapfile -t MAP < <(grep -A6 "parameter code=0x10$" <<< "$PAGE")
+  current_temp2=$(echo ${MAP[2]}|grep -oP '\d+')
+  maxtemp2_poweron=$(echo ${MAP[5]}|grep -oP '\d+')
+  mintemp2_poweron=$(echo ${MAP[6]}|grep -oP '\d+')
+  echo "tapedrv_drive_current_temp2{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $current_temp2"
+  echo "tapedrv_drive_maxtemp2_poweron{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxtemp2_poweron"
+  echo "tapedrv_drive_mintemp2_poweron{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $mintemp2_poweron"
+
+  # parameter code=0x100
+  #   ORHV=1
+  #   Relative humidity: 47 %
+  #   Lifetime maximum relative humidity: 70 %
+  #   Lifetime minimum relative humidity: 18 %
+  #   Maximum relative humidity since power on: 54 %
+  #   Minimum relative humidity since power on: 32 %
+  #   Maximum other relative humidity: 47 C
+  #   Minimum other relative humidity: 32 C
+  mapfile -t MAP < <(grep -A8 "parameter code=0x100$" <<< "$PAGE")
+  current_relhum=$(echo ${MAP[2]}|grep -oP '\d+')
+  maxrelhum_lifetime=$(echo ${MAP[3]}|grep -oP '\d+')
+  minrelhum_lifetime=$(echo ${MAP[4]}|grep -oP '\d+')
+  maxrelhum_poweron=$(echo ${MAP[5]}|grep -oP '\d+')
+  minrelhum_poweron=$(echo ${MAP[6]}|grep -oP '\d+')
+  maxrelhum_mounted=$(echo ${MAP[7]}|grep -oP '\d+')
+  minrelhum_mounted=$(echo ${MAP[8]}|grep -oP '\d+')
+
+  echo "tapedrv_drive_current_relhum{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $current_relhum"
+  echo "tapedrv_drive_maxrelhum_lifetime{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxrelhum_lifetime"
+  echo "tapedrv_drive_minrelhum_lifetime{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $minrelhum_lifetime"
+  echo "tapedrv_drive_maxrelhum_poweron{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxrelhum_poweron"
+  echo "tapedrv_drive_minrelhum_poweron{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $minrelhum_poweron"
+  echo "tapedrv_drive_maxrelhum_mounted{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $maxrelhum_mounted"
+  echo "tapedrv_drive_minrelhum_mounted{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $minrelhum_mounted"
+}
+
+function hex2dec() {
+  printf "%d" "0x$1"
+}
+
+function get_tapedrv_info() {
+  sgdev="$1"
+  vendor=${2%${2##*[![:space:]]}}
+  model=${3%${3##*[![:space:]]}}
+  fw=${4%${4##*[![:space:]]}}
+  sn=$(sg_inq $1 | grep "^ Unit serial number")
+  sn=${sn:21}
+
+  # LTO gen from TapeDrive
+  case "$model" in
+    "Ultrium "?-SCSI)
+      # Ultrium 1-SCSI .. Ultrium 9-SCSI
+      lto="LTO${model:8:1}"
+      ;;
+    ULT3580-TD[0-9A-F])
+      # ULT3580-TD1 .. ULT3580-TDF
+      hex="${model:10:1}"
+      lto="LTO$(hex2dec "$hex")"
+      ;;
+    *)
+      lto="LTO?"
+      ;;
+  esac
+
+  echo "tapedrv_drive_exists{device=\"$sgdev\", generation=\"$lto\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} 1"
+  case "$vendor" in
+  "HP")
+     get_tapedrv_ds "$sgdev" "$vendor" "$model" "$sn" "$lto"
+     current_temp=$(sg_logs --temperature $sgdev|grep "Current temperature"|grep -oP '\d+')
+     echo "tapedrv_drive_current_temp{device=\"$sgdev\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} $current_temp"
+     ;;
+  "IBM")
+     get_tapedrv_ds "$sgdev" "$vendor" "$model" "$sn" "$lto"
+     get_ibm_tapedrv_ecl "$sgdev" "$vendor" "$model" "$sn"
+     get_ibm_tapedrv_sad "$sgdev" "$vendor" "$model" "$sn"
+     ;;
+  esac
+}
+
+function get_changer_info() {
+  vendor=${2%${2##*[![:space:]]}}
+  model=${3%${3##*[![:space:]]}}
+  fw=${4%${4##*[![:space:]]}}
+  sn=$(sg_inq $1 | grep "^ Unit serial number")
+  sn=${sn:21}
+  echo "mediumchanger_device_exists{device=\"$1\", vendor=\"$vendor\", model=\"$model\", firmware=\"$fw\", serial=\"$sn\"} 1"
+}
+
+function getinfo() {
+  # 1234567 12345678 1234567890abcdef 12345
+  # tape    IBM      ULT3580-TD9      S2S0  /dev/st0   /dev/sg10
+  # tape    HP       Ultrium 6-SCSI   J5ES  /dev/st0   /dev/sg1
+  # tape    HP       Ultrium 4-SCSI   H67S  /dev/st0   /dev/sg1
+  # mediumx IBM      03584L32         1B02  /dev/sch0  /dev/sg11
+  # disk    SEAGATE  BL2400MM0159     SBS6  /dev/sdj   /dev/sg9 -> ignore
+  while read -r dev; do
+    type=${dev:0:7}
+    vendor=${dev:8:8}
+    model=${dev:17:16}
+    fw=${dev:34:4}
+    sgdev=${dev:51}
+    #echo "|$type|$vendor|$model|$fw|$sgdev|"
+    case "$type" in
+    "tape   ")
+      get_tapedrv_info "$sgdev" "$vendor" "$model" "$fw"
+      ;;
+    "mediumx")
+      get_changer_info "$sgdev" "$vendor" "$model" "$fw"
+      ;;
+    esac
+  done < <(lsscsi -g|cut -b14-)
+}
+
+METRICS_FILE="/var/lib/prometheus/node_exporter/tape_status.prom"
+
+cleanup() {
+  rm -f $METRICS_FILE
+}
+
+daemon_start() {
+  TMPFILE=$(mktemp)
+  trap cleanup EXIT
+  while [ 1 ] ; do
+    getinfo > $TMPFILE
+    chmod 644 $TMPFILE
+    mv -f $TMPFILE $METRICS_FILE
+    # run every 2nd minute only, as node exporter reads in the same interval
+    sleep $((120-($(date +%s)+30)%120))
+  done < /dev/null > /var/log/tapedrv-exporter.log 2>&1 &
+}
+
+daemon_stop() {
+  fuser -ks /var/log/tapedrv-exporter.log
+}
+
+daemon_status() {
+  fuser -s /var/log/tapedrv-exporter.log
+  if [ $? = 0 ]; then
+    echo "Running"
+  else
+    echo "Not running"
+  fi
+}
+
+case "$1" in
+  start)
+    daemon_start
+    ;;
+  stop)
+    daemon_stop
+    ;;
+  restart)
+    daemon_stop
+    daemon_start
+    ;;
+  status)
+    daemon_status
+    ;;
+  getinfo)
+    getinfo
+    ;;
+  *)
+    echo $"Usage: $1 {start|stop|restart|status|getinfo}"
+    exit 1
+esac
